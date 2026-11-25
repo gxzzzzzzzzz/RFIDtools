@@ -16,7 +16,9 @@
 #
 # 关键风险（必须先知道）：
 #   App 用 patches/ 下 3 个补丁给客户端加 Android 需要的接口
-#   （pm3_console 的流式抓取、pm3_input_* 交互输入、script run 队列）。
+#   （grabber_take_* 流式抓取、pm3_input_* 交互输入、pm3_cmdscript_run_pending 队列）。
+#   注意 pm3_console 本身是 proxmark3 上游自带的（声明在 client/include/pm3.h，
+#   定义在 client/src/pm3.c），v4.23346 与 master 签名一致，不需要补丁提供。
 #   这些补丁是按 v13（10-27）的源码上下文写的，打到 v4.23346（9-18）上
 #   可能有个别 hunk 冲突。下面用 `patch -F3` 做模糊匹配并逐个报告，
 #   真冲突会在构建日志里点名是哪个文件、哪个 hunk。
@@ -103,22 +105,26 @@ jobs:
 
       # JNI 用到的客户端符号，在这个 ref 里是否齐全。
       # 只报告不失败——真正的判定交给编译；这一步只是为了缩短一次 40 分钟的试错。
+      #
+      # 注意：pm3.h 位于 client/include/，不在 client/src/。
+      # 只搜 client/src 会误报 "missing pm3_console"（v1 就踩了这个坑）。
+      # 所以这里搜整个 client/ 子树，并且把命中文件路径打出来，便于人工核对。
       - name: Preflight — check client APIs used by pm3_jni.c
         run: |
-          P=third_party/proxmark3/client/src
-          probe() { printf '%-34s %s\n' "$1" "${2:-<none>}"; }
-          probe "client/src/pm3.h"      "$([ -f "$P/pm3.h" ] && echo present || echo MISSING)"
-          probe "pm3_console"           "$(grep -rl 'pm3_console' "$P" --include='*.h' --include='*.c' 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')"
-          probe "pm3_init"              "$(grep -rl 'pm3_init' "$P" --include='*.h' 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')"
-          probe "supports_colors"       "$(grep -rl 'supports_colors' "$P" --include='*.h' 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')"
-          probe "grabber_take_all"      "$(grep -rl 'grabber_take_all' "$P" --include='*.h' 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')"
-          probe "pm3_input_read_line"   "$(grep -rl 'pm3_input_read_line' "$P" --include='*.h' 2>/dev/null | xargs -r -n1 basename | tr '\n' ' ')"
+          set -uo pipefail
+          C=third_party/proxmark3/client
+          hits() { grep -rl -- "$1" "$C" --include='*.h' --include='*.c' 2>/dev/null | sed "s#^$C/##" | sort | tr '\n' ' '; }
 
-          miss=0
-          for s in pm3_console pm3_init grabber_take_all pm3_input_read_line; do
-            grep -rq "$s" "$P" --include='*.h' 2>/dev/null || { echo "::warning::missing symbol $s — client at this ref may be too old for the App's JNI glue"; miss=1; }
+          printf '%-26s %s\n' "pm3.h 位置" "$(ls "$C"/include/pm3.h "$C"/src/pm3.h 2>/dev/null | tr '\n' ' ')"
+          for s in pm3_console pm3_init pm3_close pm3_grabbed_output_get \
+                   grabber_take_all grabber_take_copy pm3_input_read_line pm3_input_provide; do
+            h="$(hits "$s")"
+            printf '%-26s %s\n' "$s" "${h:-MISSING}"
+            [ -n "$h" ] || echo "::warning::符号 $s 在 client 树里找不到（JNI 若用到会编译失败）"
           done
-          grep -rq 'supports_colors' "$P" --include='*.h' 2>/dev/null || echo "::warning::g_session.supports_colors not found — pm3_jni.c 里那两行需要删掉"
+          printf '%-26s %s\n' "supports_colors" "$(hits supports_colors)"
+          echo "--------------------------------------------------------------"
+          echo "以上只报告不判定；编译结果为准。"
           exit 0
 
       - name: Set up JDK 21
